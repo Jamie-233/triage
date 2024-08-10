@@ -1,5 +1,10 @@
 # Triage
 
+[![CI](https://github.com/Jamie-233/triage/actions/workflows/ci.yml/badge.svg)](https://github.com/Jamie-233/triage/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg?logo=python&logoColor=white)](pyproject.toml)
+[![Stars](https://img.shields.io/github/stars/Jamie-233/triage.svg?style=flat&color=yellow)](https://github.com/Jamie-233/triage/stargazers)
+
 **An AI agent that troubleshoots network problems the way an engineer does** — it forms hypotheses, runs real diagnostics (DNS, routing, ICMP, TCP, TLS, HTTP), narrows the fault layer by layer, and reports a diagnosis that cites its evidence. It works with any OpenAI-compatible model, including local ones through Ollama, and has a fully offline playbook mode.
 
 An abridged example session:
