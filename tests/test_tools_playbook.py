@@ -117,3 +117,33 @@ async def test_playbook_reports_application_error():
     assert [s.tool for s in run.steps] == ["tcp_connect", "http_request"]
     assert "proxy cannot reach its backend" in run.answer
     assert "TCP port" in run.answer
+
+
+async def test_http_request_dials_the_approved_address_not_a_second_resolution(monkeypatch):
+    # The hostname deliberately does not resolve on this machine. Only the
+    # pinned resolver can turn it into the address the policy approved, so an
+    # implementation that re-resolves at connect time (the TOCTOU window)
+    # fails here while the pinned one succeeds.
+    async def fake_resolve(host):
+        return ["127.0.0.1"]
+
+    monkeypatch.setattr(tools, "_resolve", fake_resolve)
+
+    async def ok(_):
+        return web.Response(text="pinned", headers={"Server": "test"})
+
+    srv = await _serve({"/": ok})
+    try:
+        url = str(srv.make_url("/")).replace("127.0.0.1", "rebind.invalid")
+        r = await tools.http_request(url)
+    finally:
+        await srv.close()
+    assert r["ok"] and r["status"] == 200
+
+
+async def test_pinned_resolver_only_answers_for_its_host():
+    resolver = tools._PinnedResolver("approved.test", "127.0.0.1")
+    with pytest.raises(OSError):
+        await resolver.resolve("other.test", 80)
+    [entry] = await resolver.resolve("approved.test", 80)
+    assert entry["host"] == "127.0.0.1" and entry["port"] == 80
