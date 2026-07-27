@@ -83,6 +83,8 @@ triage ask "..." --allow-net 10.10.0.0/16 --allow-domain corp.lan --budget 15 --
 
 ## Offline playbook
 
+![triage check finding a 502 at the application layer](docs/playbook.png)
+
 `triage check` runs the same layered method as a deterministic decision tree and stops at the first failing layer. It keeps Triage useful on isolated networks, and gives a baseline: if the agent can't beat a fixed tree on a problem, the model isn't adding value there.
 
 ## Development
