@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import aiohttp
+from aiohttp.abc import AbstractResolver
 from yarl import URL
 
 from .policy import Policy, PolicyError
@@ -41,6 +42,32 @@ async def _resolve(host: str) -> list[str]:
     loop = asyncio.get_running_loop()
     infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
     return sorted({info[4][0] for info in infos})
+
+
+class _PinnedResolver(AbstractResolver):
+    """Resolve exactly the address the policy already approved.
+
+    Checking the name and then letting aiohttp resolve it again leaves a
+    window: a record that changes between the check and the connection sends
+    the request somewhere the allowlist never approved (DNS rebinding / TOCTOU).
+    Pinning the socket to the checked address closes it. TLS still validates
+    the certificate against the URL host, because SNI comes from the URL, not
+    from the address we dial.
+    """
+
+    def __init__(self, host: str, address: str) -> None:
+        self._host = host
+        self._address = address
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_UNSPEC):
+        if host != self._host:
+            raise OSError(f"resolver is pinned to {self._host}, refusing to resolve {host}")
+        fam = socket.AF_INET6 if ":" in self._address else socket.AF_INET
+        return [{"hostname": host, "host": self._address, "port": port,
+                 "family": fam, "proto": 0, "flags": 0}]
+
+    async def close(self) -> None:
+        return None
 
 
 @registry.tool
@@ -135,17 +162,23 @@ async def http_request(url: str, method: Literal["GET", "HEAD"] = "GET") -> dict
     chain: list[str] = []
     start = time.perf_counter()
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as s:
-            current = URL(url)
-            # Redirects are followed by hand so every hop passes the policy:
-            # an allowed site redirecting to an internal admin panel must not
-            # quietly turn the agent into a proxy for it.
-            for _ in range(6):
-                if current.scheme not in ("http", "https"):
-                    raise PolicyError("only http:// and https:// URLs are allowed")
-                host = _policy.check_host(current.host or "")
-                _policy.check_resolved(host, await _resolve(host))
-                chain.append(str(current))
+        current = URL(url)
+        # Redirects are followed by hand so every hop passes the policy:
+        # an allowed site redirecting to an internal admin panel must not
+        # quietly turn the agent into a proxy for it.
+        for _ in range(6):
+            if current.scheme not in ("http", "https"):
+                raise PolicyError("only http:// and https:// URLs are allowed")
+            host = _policy.check_host(current.host or "")
+            addresses = await _resolve(host)
+            _policy.check_resolved(host, addresses)
+            chain.append(str(current))
+            # Dial the address that just passed the policy check, and re-pin
+            # for every redirect hop.
+            connector = aiohttp.TCPConnector(resolver=_PinnedResolver(host, addresses[0]))
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=8), connector=connector
+            ) as s:
                 async with s.request(method, current, allow_redirects=False) as resp:
                     if resp.status in (301, 302, 303, 307, 308) and "Location" in resp.headers:
                         current = current.join(URL(resp.headers["Location"]))
@@ -160,7 +193,7 @@ async def http_request(url: str, method: Literal["GET", "HEAD"] = "GET") -> dict
                             "headers": {k: v for k, v in resp.headers.items()
                                         if k.lower() in ("server", "via", "location", "x-cache", "retry-after")},
                             "body_excerpt": body}
-            return {"ok": False, "summary": f"redirect loop: {' → '.join(chain)}"}
+        return {"ok": False, "summary": f"redirect loop: {' → '.join(chain)}"}
     except aiohttp.ClientConnectorCertificateError as exc:
         return {"ok": False, "summary": f"TLS certificate rejected: {exc.certificate_error}"}
     except asyncio.TimeoutError:
