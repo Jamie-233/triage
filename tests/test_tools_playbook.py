@@ -147,3 +147,86 @@ async def test_pinned_resolver_only_answers_for_its_host():
         await resolver.resolve("other.test", 80)
     [entry] = await resolver.resolve("approved.test", 80)
     assert entry["host"] == "127.0.0.1" and entry["port"] == 80
+
+
+# --- the same guarantee for the tools that are not HTTP -------------------------
+#
+# Each of these resolves the name, checks the answer against the policy, and
+# must then connect to *that* address. The hostname used below does not resolve
+# on this machine, so a tool that resolves a second time cannot produce the
+# approved address by accident.
+
+def _approve(monkeypatch, address="127.0.0.1"):
+    async def fake_resolve(host):
+        return [address]
+
+    monkeypatch.setattr(tools, "_resolve", fake_resolve)
+
+
+async def test_tls_certificate_connects_to_the_approved_address(monkeypatch):
+    _approve(monkeypatch)
+    seen = {}
+
+    async def fake_open_connection(host, port, **kw):
+        seen.update(host=host, port=port, **kw)
+        raise OSError("stop here")
+
+    monkeypatch.setattr(tools.asyncio, "open_connection", fake_open_connection)
+    r = await tools.tls_certificate("rebind.invalid", 8443)
+    assert not r["ok"]
+    assert seen["host"] == "127.0.0.1", "connected by name, which resolves a second time"
+    assert seen["server_hostname"] == "rebind.invalid", "SNI and verification must still use the name"
+
+
+async def test_ping_targets_the_approved_address(monkeypatch):
+    import icmplib
+    from icmplib.exceptions import ICMPLibError
+
+    _approve(monkeypatch)
+    seen = {}
+
+    async def fake_ping(address, **kw):
+        seen["address"] = address
+        raise ICMPLibError("stop here")
+
+    monkeypatch.setattr(icmplib, "async_ping", fake_ping)
+    await tools.ping("rebind.invalid")
+    assert seen["address"] == "127.0.0.1"
+
+
+async def test_traceroute_targets_the_approved_address(monkeypatch):
+    _approve(monkeypatch)
+    seen = {}
+
+    async def fake_exec(*argv, **kw):
+        seen["argv"] = argv
+        raise OSError("stop here")
+
+    monkeypatch.setattr(tools.shutil, "which", lambda name: "/usr/bin/traceroute" if name == "traceroute" else None)
+    monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(OSError):
+        await tools.traceroute("rebind.invalid")
+    assert seen["argv"][-1] == "127.0.0.1" and "rebind.invalid" not in seen["argv"]
+
+
+@pytest.mark.parametrize("call", [
+    lambda: tools.ping("files.corp.lan"),
+    lambda: tools.traceroute("files.corp.lan"),
+    lambda: tools.tls_certificate("files.corp.lan"),
+])
+async def test_name_resolving_outside_scope_is_refused_before_any_packet(monkeypatch, call):
+    from triage.policy import PolicyError
+
+    tools.set_policy(Policy(allowed_networks=["10.0.0.0/8"], allowed_domains=["corp.lan"]))
+    _approve(monkeypatch, "203.0.113.5")
+
+    async def must_not_run(*a, **kw):
+        raise AssertionError("a packet would have been sent")
+
+    monkeypatch.setattr(tools.asyncio, "open_connection", must_not_run)
+    monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", must_not_run)
+    monkeypatch.setattr(tools.shutil, "which", lambda name: "/usr/bin/traceroute")
+    import icmplib
+    monkeypatch.setattr(icmplib, "async_ping", must_not_run)
+    with pytest.raises(PolicyError, match="resolves to"):
+        await call()

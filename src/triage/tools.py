@@ -44,6 +44,19 @@ async def _resolve(host: str) -> list[str]:
     return sorted({info[4][0] for info in infos})
 
 
+async def _approved_address(host: str) -> str:
+    """Resolve once, check the result against the policy, and return the address.
+
+    Callers must connect to the returned address, never to the name again:
+    resolving a second time at connect time reopens the window that DNS
+    rebinding uses (the name answers with an allowed address for the check and
+    a forbidden one for the connection).
+    """
+    addrs = await _resolve(host)
+    _policy.check_resolved(host, addrs)
+    return addrs[0]
+
+
 class _PinnedResolver(AbstractResolver):
     """Resolve exactly the address the policy already approved.
 
@@ -214,14 +227,17 @@ async def tls_certificate(host: str, port: int = 443) -> dict:
     """
     host = _policy.check_host(host)
     port = _policy.check_port(port)
-    _policy.check_resolved(host, await _resolve(host))
+    try:
+        address = await _approved_address(host)
+    except socket.gaierror as exc:
+        return {"ok": False, "summary": f"cannot resolve {host}: {exc.strerror}"}
 
     async def grab(verify: bool):
         ctx = ssl.create_default_context()
         if not verify:
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
-        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port, ssl=ctx, server_hostname=host), 6)
+        _, writer = await asyncio.wait_for(asyncio.open_connection(address, port, ssl=ctx, server_hostname=host), 6)
         sslobj = writer.get_extra_info("ssl_object")
         der = sslobj.getpeercert(binary_form=True)
         info = sslobj.getpeercert() if verify else None
@@ -271,7 +287,11 @@ async def ping(host: str, count: int = 4) -> dict:
     host = _policy.check_host(host)
     count = max(1, min(int(count), 10))
     try:
-        r = await async_ping(host, count=count, interval=0.3, timeout=2, privileged=False)
+        address = await _approved_address(host)
+    except socket.gaierror as exc:
+        return {"ok": False, "summary": f"cannot resolve {host}: {exc.strerror}"}
+    try:
+        r = await async_ping(address, count=count, interval=0.3, timeout=2, privileged=False)
     except SocketPermissionError:
         return {"ok": False, "summary": "ICMP not permitted for this user (ping_group_range); use tcp_connect instead"}
     except ICMPLibError as exc:
@@ -300,8 +320,12 @@ async def traceroute(host: str, max_hops: int = 20) -> dict:
     binary = shutil.which("traceroute") or shutil.which("tracepath")
     if not binary:
         return {"ok": False, "summary": "neither traceroute nor tracepath is installed on this machine"}
-    argv = [binary, "-n", "-w", "2", "-q", "1", "-m", str(max_hops), host] if binary.endswith("traceroute") \
-        else [binary, "-n", "-m", str(max_hops), host]
+    try:
+        address = await _approved_address(host)
+    except socket.gaierror as exc:
+        return {"ok": False, "summary": f"cannot resolve {host}: {exc.strerror}"}
+    argv = [binary, "-n", "-w", "2", "-q", "1", "-m", str(max_hops), address] if binary.endswith("traceroute") \
+        else [binary, "-n", "-m", str(max_hops), address]
     proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE,
                                                 stderr=asyncio.subprocess.STDOUT)
     try:
