@@ -26,6 +26,12 @@ $ triage ask "staff can't open https://intranet.corp.lan since this morning" --p
 │ ...                                                                    │
 ```
 
+## Why not just a chat model with a shell?
+
+A chat model with no tools can only guess; one with a general shell can run whatever it is talked into. Triage sits between them: a small set of narrow tools whose arguments are validated, whose scope is enforced in code, and whose results the final answer has to cite. A diagnosis is only as good as its evidence, and the evidence here is a trace anyone can read.
+
+The same reasoning is why the offline playbook exists. It is the baseline the agent should have to beat. **That comparison has not been run yet** (see below), so for now the claim is that the agent is auditable and bounded, not that it is more accurate than a fixed decision tree.
+
 ## How it works
 
 ```
@@ -91,6 +97,17 @@ triage ask "..." --allow-net 10.10.0.0/16 --allow-domain corp.lan --budget 15 --
 ![triage check finding a 502 at the application layer](docs/playbook.png)
 
 `triage check` runs the same layered method as a deterministic decision tree and stops at the first failing layer. It keeps Triage useful on isolated networks, and gives a baseline: if the agent can't beat a fixed tree on a problem, the model isn't adding value there.
+
+## What has been verified
+
+| Area | How | Not yet |
+|---|---|---|
+| Target validation, network and domain scope, call budget | unit tests | - |
+| Connecting to the address the policy approved (`http_request`, `tls_certificate`, `ping`, `traceroute`), and refusing a name that resolves outside scope | tests with stubbed resolution; they fail on the previous code that re-resolved at connect time | `tcp_connect` connects to the checked address by construction but has no dedicated test |
+| HTTP redirects (followed, loop detected, out-of-scope hop blocked), TCP open/refused, subnet maths | tests against local servers | - |
+| Agent loop: parallel calls, errors as observations, budget, forced conclusion, truncation, OpenAI-compatible wire format and 429 retry | scripted model and a fake server | any real model |
+| `dns_lookup`, `tls_certificate`, `ping`, `traceroute` against real targets | - | no automated test touches a real resolver, certificate or router |
+| Diagnosis quality of the agent, and agent versus playbook | - | **no accuracy has been measured** |
 
 ## Development
 
